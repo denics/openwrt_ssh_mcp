@@ -372,6 +372,50 @@ async def execute_tool_calls(
 # ---------------------------------------------------------------------------
 
 
+def _build_system_content(snapshot_md: str) -> str:
+    """Prepend router snapshot to the base system prompt if available."""
+    return (snapshot_md + SYSTEM_PROMPT) if snapshot_md else SYSTEM_PROMPT
+
+
+async def _load_router_context(session: ClientSession) -> str:
+    """Read cached snapshot from router; fall back to full bootstrap."""
+    snapshot_md = ""
+    try:
+        cache_result = await session.call_tool(
+            "openwrt_read_file", {"path": "/tmp/AGENTS.md", "max_lines": 100}
+        )
+        cache_text = "".join(
+            c.text for c in cache_result.content if hasattr(c, "text")
+        ) if hasattr(cache_result, "content") and cache_result.content else ""
+        cache_data = json.loads(cache_text)
+        if cache_data.get("success") and cache_data.get("content", "").strip():
+            snapshot_md = cache_data["content"]
+            print("  Reading cached router snapshot... done!")
+    except Exception:
+        pass
+
+    if not snapshot_md:
+        print("  Running router bootstrap...", end="", flush=True)
+        try:
+            boot_result = await session.call_tool("openwrt_bootstrap", {})
+            if hasattr(boot_result, "content") and boot_result.content:
+                full_text = "".join(
+                    c.text for c in boot_result.content if hasattr(c, "text")
+                )
+                data = json.loads(full_text)
+                if data.get("success") and data.get("snapshot"):
+                    snapshot_md = format_snapshot_markdown(data["snapshot"])
+                    if data.get("error_count", 0) > 0:
+                        print(f" {data['error_count']} warnings", end="")
+                    print(" done!")
+                else:
+                    print(" failed (snapshot empty)")
+        except Exception as e:
+            print(f" error: {e}")
+
+    return snapshot_md
+
+
 async def run_chat_loop(
     session: ClientSession,
     client: AsyncOpenAI,
@@ -389,10 +433,15 @@ async def run_chat_loop(
     print(f"  LLM:      {model} @ {settings.openai_base_url}")
     print(f"  Tools:    {len(openai_tools)} available")
     print(f"{'='*60}")
+
+    snapshot_md = await _load_router_context(session)
+
+    print(f"\n{'='*60}")
     print("  Type /quit or /exit to stop, /tools to list tools, /new to reset")
     print("  Commands: use natural language to manage your router\n")
 
-    history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system_content = _build_system_content(snapshot_md)
+    history: list[dict] = [{"role": "system", "content": system_content}]
 
     while True:
         try:
@@ -429,8 +478,10 @@ async def run_chat_loop(
             continue
 
         if cmd == "/new":
-            history = [{"role": "system", "content": SYSTEM_PROMPT}]
-            print("  Conversation reset.")
+            print("  Refreshing router context...")
+            fresh_md = await _load_router_context(session)
+            history = [{"role": "system", "content": _build_system_content(fresh_md)}]
+            print("  Conversation reset with fresh context.")
             continue
 
         # Add user message to history
@@ -455,8 +506,8 @@ async def run_chat_loop(
         msg = choice.message
 
         # Handle tool calling
+        tools_used = bool(msg.tool_calls)
         if msg.tool_calls:
-            # Native OpenAI tool calling
             final_content = await execute_tool_calls(
                 session=session,
                 msg=msg,
@@ -468,9 +519,9 @@ async def run_chat_loop(
                 temperature=temperature,
             )
         else:
-            # Fallback: some local LLMs output tool calls as inline text
             inline_calls = parse_inline_tool_calls(msg.content or "")
             if inline_calls:
+                tools_used = True
                 print(f"\n  [Parsed {len(inline_calls)} inline tool call(s) from text]")
                 final_content = await execute_inline_tool_calls(
                     session=session,
@@ -488,9 +539,82 @@ async def run_chat_loop(
         if final_content:
             print(f"\n{final_content}")
 
+        if tools_used:
+            # A tool was called — router state may have changed.
+            # Refresh the snapshot cache on disk for next session.
+            try:
+                await session.call_tool("openwrt_bootstrap", {})
+            except Exception:
+                pass  # non-critical, silence
+
         # Add the final assistant message to history
         history.append({"role": "assistant", "content": final_content or ""})
         history = prune_messages(history)
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap snapshot formatter
+# ---------------------------------------------------------------------------
+
+
+def format_snapshot_markdown(snapshot: dict[str, Any]) -> str:
+    """Compile a bootstrap snapshot dict into a concise router overview."""
+    lines: list[str] = []
+    lines.append("## Router Snapshot (auto-generated)")
+    lines.append("")
+
+    router = snapshot.get("router", "?")
+    lines.append(f"**Router:** {router}")
+    lines.append("")
+
+    # System info
+    si = snapshot.get("system_info", {})
+    if si:
+        board = si.get("board", {}) if isinstance(si, dict) else {}
+        info = si.get("info", {}) if isinstance(si, dict) else {}
+        if board:
+            model = board.get("model", board.get("model_name", "?"))
+            lines.append(f"**Model:** {model}")
+        if info:
+            mem = info.get("memory", {})
+            if isinstance(mem, dict):
+                total = mem.get("total", 0)
+                lines.append(f"**Memory:** {total // 1024}MB" if total else "")
+            uptime_raw = si.get("uptime", "0")
+            try:
+                uptime_sec = float(uptime_raw.split()[0]) if uptime_raw else 0
+                days = int(uptime_sec // 86400)
+                hours = int((uptime_sec % 86400) // 3600)
+                lines.append(f"**Uptime:** {days}d {hours}h")
+            except (ValueError, IndexError):
+                pass
+    lines.append("")
+
+    # Installed packages
+    pkg_count = snapshot.get("package_count", 0)
+    lines.append(f"**Installed packages:** {pkg_count}")
+    lines.append("")
+
+    # DHCP clients
+    dhcp_count = snapshot.get("dhcp_count", 0)
+    lines.append(f"**DHCP leases:** {dhcp_count}")
+    lines.append("")
+
+    # UCI configs summary
+    for cfg in ("network", "wireless", "dhcp", "firewall", "system"):
+        raw = snapshot.get(f"uci_{cfg}")
+        if raw:
+            stanzas = [l for l in raw.split("\n") if l.startswith("cfg") or l.startswith("package")]
+            lines.append(f"**UCI {cfg}:** {len(stanzas)} sections")
+        else:
+            lines.append(f"**UCI {cfg}:** (not available)")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("*This snapshot was taken at session start. Re-run openwrt_bootstrap to refresh.*")
+    lines.append("")
+
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
