@@ -378,42 +378,25 @@ def _build_system_content(snapshot_md: str) -> str:
 
 
 async def _load_router_context(session: ClientSession) -> str:
-    """Read cached snapshot from router; fall back to full bootstrap."""
-    snapshot_md = ""
+    """Run full router bootstrap and format snapshot for system context."""
+    print("  Running router bootstrap...", end="", flush=True)
     try:
-        cache_result = await session.call_tool(
-            "openwrt_read_file", {"path": "/tmp/AGENTS.md", "max_lines": 100}
-        )
-        cache_text = "".join(
-            c.text for c in cache_result.content if hasattr(c, "text")
-        ) if hasattr(cache_result, "content") and cache_result.content else ""
-        cache_data = json.loads(cache_text)
-        if cache_data.get("success") and cache_data.get("content", "").strip():
-            snapshot_md = cache_data["content"]
-            print("  Reading cached router snapshot... done!")
-    except Exception:
-        pass
-
-    if not snapshot_md:
-        print("  Running router bootstrap...", end="", flush=True)
-        try:
-            boot_result = await session.call_tool("openwrt_bootstrap", {})
-            if hasattr(boot_result, "content") and boot_result.content:
-                full_text = "".join(
-                    c.text for c in boot_result.content if hasattr(c, "text")
-                )
-                data = json.loads(full_text)
-                if data.get("success") and data.get("snapshot"):
-                    snapshot_md = format_snapshot_markdown(data["snapshot"])
-                    if data.get("error_count", 0) > 0:
-                        print(f" {data['error_count']} warnings", end="")
-                    print(" done!")
-                else:
-                    print(" failed (snapshot empty)")
-        except Exception as e:
-            print(f" error: {e}")
-
-    return snapshot_md
+        boot_result = await session.call_tool("openwrt_bootstrap", {})
+        if hasattr(boot_result, "content") and boot_result.content:
+            full_text = "".join(
+                c.text for c in boot_result.content if hasattr(c, "text")
+            )
+            data = json.loads(full_text)
+            if data.get("success") and data.get("snapshot"):
+                snapshot_md = format_snapshot_markdown(data["snapshot"])
+                if data.get("error_count", 0) > 0:
+                    print(f" {data['error_count']} warnings", end="")
+                print(" done!")
+                return snapshot_md
+        print(" failed (snapshot empty)")
+    except Exception as e:
+        print(f" error: {e}")
+    return ""
 
 
 async def run_chat_loop(
@@ -506,7 +489,6 @@ async def run_chat_loop(
         msg = choice.message
 
         # Handle tool calling
-        tools_used = bool(msg.tool_calls)
         if msg.tool_calls:
             final_content = await execute_tool_calls(
                 session=session,
@@ -521,7 +503,6 @@ async def run_chat_loop(
         else:
             inline_calls = parse_inline_tool_calls(msg.content or "")
             if inline_calls:
-                tools_used = True
                 print(f"\n  [Parsed {len(inline_calls)} inline tool call(s) from text]")
                 final_content = await execute_inline_tool_calls(
                     session=session,
@@ -538,14 +519,6 @@ async def run_chat_loop(
 
         if final_content:
             print(f"\n{final_content}")
-
-        if tools_used:
-            # A tool was called — router state may have changed.
-            # Refresh the snapshot cache on disk for next session.
-            try:
-                await session.call_tool("openwrt_bootstrap", {})
-            except Exception:
-                pass  # non-critical, silence
 
         # Add the final assistant message to history
         history.append({"role": "assistant", "content": final_content or ""})
