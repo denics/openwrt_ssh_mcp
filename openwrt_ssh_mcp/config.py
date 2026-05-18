@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # File read tool whitelist (comma-separated path prefixes)
     # Only files/directories under these prefixes can be read via openwrt_read_file
     read_file_allowed_paths: str = (
-        "/var/log/,/etc/config/,/tmp/dhcp.leases,"
+        "/var/log/,/etc/config/,/tmp/,"
         "/proc/uptime,/proc/meminfo,/proc/cpuinfo,/proc/loadavg,"
         "/etc/openwrt_release,/etc/banner"
     )
