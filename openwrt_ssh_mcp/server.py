@@ -241,6 +241,21 @@ async def list_tools() -> list[Tool]:
                 "required": ["path"],
             },
         ),
+        # Router bootstrap — full discovery snapshot
+        Tool(
+            name="openwrt_bootstrap",
+            description=(
+                "Run full router discovery and return a compiled snapshot "
+                "including system info, all UCI configs, key system files, "
+                "package inventory, and network status. Call this first "
+                "to get a complete overview of the router state."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        ),
         # Package Management (opkg) Tools
         Tool(
             name="openwrt_opkg_update",
@@ -405,6 +420,9 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
                 raise ValueError("Missing required argument: path")
             max_lines = arguments.get("max_lines", 100)
             result = await OpenWRTTools.read_file(path, max_lines)
+
+        elif name == "openwrt_bootstrap":
+            result = await OpenWRTTools.bootstrap()
 
         elif name == "openwrt_opkg_list_available":
             result = await OpenWRTTools.opkg_list_available()
