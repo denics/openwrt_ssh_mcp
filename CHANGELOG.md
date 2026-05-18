@@ -50,6 +50,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `openwrt_read_file` tool for reading router files (logs, configs, system files) with configurable path whitelist (`READ_FILE_ALLOWED_PATHS` in `.env`)
+- Inline tool call fallback parser in chat CLI — handles LLMs that output tool calls as JSON text/markdown instead of native OpenAI function calling
+- `cat /var/log/*`, `head -n *` patterns to command whitelist for log file reading
+- `cat /etc/banner` pattern to command whitelist
+
+### Changed
+- Updated `.env.example` with `READ_FILE_ALLOWED_PATHS` configuration section
+- Strengthened chat system prompt to encourage native tool calling format
+
 ### Planned
 - Web UI for monitoring
 - Metrics and alerting

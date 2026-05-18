@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sys
 from typing import Any
 
@@ -39,9 +40,15 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """You are an OpenWRT router management assistant. You have access to tools that let you manage an OpenWRT router via SSH.
 
 Available tool categories:
-- System & Network: test connection, execute commands, get system info, restart interfaces, wifi status, DHCP leases, firewall rules, UCI config
+- System & Network: test connection, execute commands, get system info, restart interfaces, wifi status, DHCP leases, firewall rules, UCI config, read files
 - OpenThread Border Router: Thread network state, create network, get dataset, get info, enable commissioner
 - Package Management: opkg update, install, remove, list packages, package info
+
+IMPORTANT - Tool calling format:
+You MUST use the native function/tool calling mechanism to invoke tools.
+Do NOT output tool calls as JSON in markdown code blocks (```json...```).
+Do NOT use <tool_call> tags.
+Use the provided tool functions directly — the system handles execution.
 
 Rules:
 1. For questions about the router's status, use the appropriate tool first, then summarize the results clearly.
@@ -105,6 +112,141 @@ def format_tool_result(result_text: str, max_len: int = 300) -> str:
     if len(result_text) <= max_len:
         return result_text
     return result_text[:max_len] + f"\n... [truncated, {len(result_text)} total chars]"
+
+
+# ---------------------------------------------------------------------------
+# Inline tool call parser (fallback for local LLMs)
+# ---------------------------------------------------------------------------
+
+# Pattern: ```json\n{"name": "...", "arguments": {...}}\n```
+# Also matches plain {"name": "...", "arguments": {...}} and <tool_call> wrappers
+_INLINE_TOOL_CALL_RE = re.compile(
+    r'(?:```(?:json)?\s*)?'          # optional ```json fence
+    r'(?:<tool_call>\s*)?'           # optional <tool_call> tag
+    r'\{\s*"name"\s*:\s*"(?P<name>[^"]+)"\s*,'
+    r'\s*"arguments"\s*:\s*(?P<args>\{.*?\})\s*\}'
+    r'(?:\s*</tool_call>\s*)?'      # optional </tool_call> tag
+    r'(?:\s*```\s*)?',               # optional closing fence
+    re.DOTALL,
+)
+
+
+def parse_inline_tool_calls(text: str) -> list[dict]:
+    """Scan text for inline JSON tool calls and return parsed calls.
+
+    Handles formats like:
+      {"name": "...", "arguments": {...}}
+      ```json {"name": "...", "arguments": {...}} ```
+      <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+    """
+    calls = []
+    for match in _INLINE_TOOL_CALL_RE.finditer(text):
+        name = match.group("name")
+        args_raw = match.group("args")
+        try:
+            args = json.loads(args_raw)
+        except json.JSONDecodeError:
+            args = {}
+        calls.append({"name": name, "arguments": args})
+    return calls
+
+
+async def execute_inline_tool_calls(
+    session: ClientSession,
+    calls: list[dict],
+    history: list[dict],
+    openai_tools: list[dict],
+    client: AsyncOpenAI,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+) -> str | None:
+    """Execute inline-parsed tool calls and return the LLM's final response."""
+    assistant_msg: dict[str, Any] = {
+        "role": "assistant",
+        "content": None,  # content is tool call, suppress display
+        "tool_calls": [],
+    }
+
+    for i, call in enumerate(calls):
+        call_id = f"inline_call_{i}"
+        assistant_msg["tool_calls"].append({
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": call["name"],
+                "arguments": json.dumps(call["arguments"]),
+            },
+        })
+
+    history.append(assistant_msg)
+
+    for call in calls:
+        tool_name = call["name"]
+        tool_args = call["arguments"]
+        args_display = format_tool_args(tool_args)
+        print(f"  [Tool] {tool_name}({args_display})")
+        sys.stdout.flush()
+
+        result_text = ""
+        try:
+            result = await session.call_tool(tool_name, tool_args)
+            if hasattr(result, "content") and result.content:
+                parts = []
+                for c in result.content:
+                    if hasattr(c, "text"):
+                        parts.append(c.text)
+                    else:
+                        parts.append(str(c))
+                result_text = "".join(parts)
+            elif isinstance(result, dict):
+                result_text = json.dumps(result, indent=2, ensure_ascii=False)
+            else:
+                result_text = str(result)
+
+            is_error = getattr(result, "isError", False)
+            if is_error:
+                print(f"  [Tool Error] {format_tool_result(result_text)}")
+        except Exception as e:
+            result_text = json.dumps({"error": str(e)}, ensure_ascii=False)
+            print(f"  [Tool Exception] {e}")
+
+        call_id = f"inline_call_{calls.index(call)}"
+        history.append({
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": result_text[:8000] if result_text else "(no output)",
+        })
+
+    history = prune_messages(history)
+
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=history,
+            tools=openai_tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+        next_msg = response.choices[0].message
+
+        if next_msg.tool_calls:
+            return await execute_tool_calls(
+                session=session,
+                msg=next_msg,
+                history=history,
+                openai_tools=openai_tools,
+                client=client,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
+        return next_msg.content
+
+    except Exception as e:
+        print(f"\n[API Error during tool result processing] {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -312,8 +454,9 @@ async def run_chat_loop(
         choice = response.choices[0]
         msg = choice.message
 
-        # Handle tool calling if the LLM requests tools
+        # Handle tool calling
         if msg.tool_calls:
+            # Native OpenAI tool calling
             final_content = await execute_tool_calls(
                 session=session,
                 msg=msg,
@@ -325,7 +468,22 @@ async def run_chat_loop(
                 temperature=temperature,
             )
         else:
-            final_content = msg.content
+            # Fallback: some local LLMs output tool calls as inline text
+            inline_calls = parse_inline_tool_calls(msg.content or "")
+            if inline_calls:
+                print(f"\n  [Parsed {len(inline_calls)} inline tool call(s) from text]")
+                final_content = await execute_inline_tool_calls(
+                    session=session,
+                    calls=inline_calls,
+                    history=history,
+                    openai_tools=openai_tools,
+                    client=client,
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+            else:
+                final_content = msg.content
 
         if final_content:
             print(f"\n{final_content}")

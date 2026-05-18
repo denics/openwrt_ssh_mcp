@@ -7,6 +7,7 @@ from typing import Any
 
 from .ssh_client import ssh_client
 from .security import SecurityValidator
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,88 @@ class OpenWRTTools:
             return {
                 "success": False,
                 "error": result["error"],
+            }
+
+    @staticmethod
+    async def read_file(path: str, max_lines: int = 100) -> dict[str, Any]:
+        """
+        Read a file from the OpenWRT router.
+
+        Only files under whitelisted path prefixes (configured via
+        READ_FILE_ALLOWED_PATHS in .env) can be read.
+
+        Args:
+            path: Absolute file path on the router (e.g. /var/log/messages)
+            max_lines: Maximum number of lines to read (default: 100, max: 500)
+
+        Returns:
+            dict: File contents or error
+        """
+        # Validate max_lines
+        if max_lines < 1:
+            max_lines = 1
+        elif max_lines > 500:
+            max_lines = 500
+
+        # Parse allowed prefixes from config (comma-separated)
+        allowed_prefixes = [
+            p.strip()
+            for p in settings.read_file_allowed_paths.split(",")
+            if p.strip()
+        ]
+
+        # Check path against whitelist
+        allowed = False
+        for prefix in allowed_prefixes:
+            if path.startswith(prefix):
+                allowed = True
+                break
+
+        if not allowed:
+            logger.warning(f"Read-file denied (not in whitelist): {path}")
+            return {
+                "success": False,
+                "error": (
+                    f"Access denied: '{path}' is not in the allowed paths whitelist. "
+                    f"Configure READ_FILE_ALLOWED_PATHS in .env to add it."
+                ),
+            }
+
+        # Path traversal check
+        if ".." in path.split("/"):
+            return {
+                "success": False,
+                "error": "Path traversal detected ('..') — access denied.",
+            }
+
+        try:
+            await ssh_client.ensure_connected()
+            command = f"head -n {max_lines} '{path}'"
+            result = await ssh_client.execute(command)
+
+            if result["success"]:
+                return {
+                    "success": True,
+                    "path": path,
+                    "content": result["stdout"],
+                    "lines_read": len(result["stdout"].split("\n")) if result["stdout"] else 0,
+                }
+            else:
+                if "No such file" in result["stderr"] or "cannot open" in result["stderr"]:
+                    return {
+                        "success": False,
+                        "error": f"File not found: {path}",
+                    }
+                return {
+                    "success": False,
+                    "error": f"Failed to read file: {result['stderr']}",
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to read file '{path}': {e}")
+            return {
+                "success": False,
+                "error": str(e),
             }
 
     @staticmethod

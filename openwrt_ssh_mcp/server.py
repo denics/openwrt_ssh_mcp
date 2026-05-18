@@ -212,6 +212,35 @@ async def list_tools() -> list[Tool]:
                 "required": [],
             },
         ),
+        Tool(
+            name="openwrt_read_file",
+            description=(
+                "Read a file from the OpenWRT router. "
+                "Only files under whitelisted path prefixes are allowed "
+                "(configured via READ_FILE_ALLOWED_PATHS in .env). "
+                "Useful for reading log files, configs, or system files."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Absolute file path on the router "
+                            "(e.g., /var/log/messages, /etc/config/network)"
+                        ),
+                    },
+                    "max_lines": {
+                        "type": "integer",
+                        "description": "Maximum lines to read (default: 100, max: 500)",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 500,
+                    },
+                },
+                "required": ["path"],
+            },
+        ),
         # Package Management (opkg) Tools
         Tool(
             name="openwrt_opkg_update",
@@ -369,6 +398,13 @@ async def call_tool(name: str, arguments: Any) -> list[TextContent]:
             if not package_name:
                 raise ValueError("Missing required argument: package_name")
             result = await OpenWRTTools.opkg_info(package_name)
+
+        elif name == "openwrt_read_file":
+            path = arguments.get("path")
+            if not path:
+                raise ValueError("Missing required argument: path")
+            max_lines = arguments.get("max_lines", 100)
+            result = await OpenWRTTools.read_file(path, max_lines)
 
         elif name == "openwrt_opkg_list_available":
             result = await OpenWRTTools.opkg_list_available()

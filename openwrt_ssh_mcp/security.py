@@ -22,7 +22,6 @@ class SecurityValidator:
         r"^ubus call system board$",  # System info
         r"^ubus call system info$",  # System info
         r"^ubus list.*$",  # List available ubus services
-        
         # UCI configuration reads
         r"^uci show network$",  # Network config
         r"^uci show wireless$",  # Wireless config
@@ -30,34 +29,31 @@ class SecurityValidator:
         r"^uci show firewall$",  # Firewall config
         r"^uci show system$",  # System config
         r"^uci get \w+\.\S+$",  # Get specific UCI value
-        
         # System information (read-only)
         r"^cat /proc/(uptime|meminfo|cpuinfo|loadavg)$",
         r"^cat /etc/openwrt_release$",
+        r"^cat /etc/banner$",
+        r"^cat /var/log/\S+$",  # Generic log file reading
+        r"^head -n \d+ /\S+$",  # Bounded line reads
         r"^ip addr show$",
         r"^ip route show$",
         r"^df -h$",
         r"^free$",
         r"^uptime$",
-        
         # DHCP lease information
         r"^cat /tmp/dhcp\.leases$",
         r"^cat /var/dhcp\.leases$",
-        
         # Firewall status
         r"^iptables -L -n -v$",
         r"^iptables -t nat -L -n -v$",
-        
         # Process information
         r"^ps$",
         r"^ps w$",
         r"^top -n 1 -b$",
-        
         # Network diagnostics
         r"^ping -c \d+ [\w\.\-]+$",
         r"^traceroute [\w\.\-]+$",
         r"^nslookup [\w\.\-]+$",
-        
         # OpenThread Border Router (OTBR) commands
         r"^(/usr/sbin/)?ot-ctl state$",
         r"^(/usr/sbin/)?ot-ctl channel$",
@@ -92,7 +88,6 @@ class SecurityValidator:
         r"^(/usr/sbin/)?ot-ctl commissioner start$",
         r"^(/usr/sbin/)?ot-ctl commissioner stop$",
         r"^(/usr/sbin/)?ot-ctl commissioner joiner add \* [\w\-]+$",
-        
         # Package management (opkg) commands
         r"^opkg update$",
         r"^opkg list$",
@@ -129,7 +124,7 @@ class SecurityValidator:
     def validate_command(cls, command: str) -> tuple[bool, Optional[str]]:
         """
         Validate if a command is safe to execute.
-        
+
         Returns:
             tuple[bool, Optional[str]]: (is_valid, error_message)
         """
@@ -170,19 +165,18 @@ class AuditLogger:
         # Create file handler for audit log
         file_handler = logging.FileHandler(self.log_file, encoding="utf-8")
         file_handler.setLevel(logging.INFO)
-        
+
         # Format: timestamp | level | message
         formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
+            "%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
         file_handler.setFormatter(formatter)
-        
+
         # Add handler to root logger
         audit_logger = logging.getLogger("audit")
         audit_logger.setLevel(logging.INFO)
         audit_logger.addHandler(file_handler)
-        
+
         self.logger = audit_logger
 
     def log_command(
@@ -195,7 +189,7 @@ class AuditLogger:
     ):
         """
         Log command execution details.
-        
+
         Args:
             command: The command that was executed
             success: Whether execution was successful
@@ -207,18 +201,18 @@ class AuditLogger:
             return
 
         status = "SUCCESS" if success else "FAILED"
-        
+
         # Truncate output for logging
         log_output = ""
         if output:
             log_output = output[:200] + "..." if len(output) > 200 else output
             log_output = log_output.replace("\n", " ")
-        
+
         log_message = f"COMMAND: {command} | STATUS: {status}"
-        
+
         if execution_time:
             log_message += f" | TIME: {execution_time:.2f}s"
-        
+
         if error:
             log_message += f" | ERROR: {error}"
         elif log_output:
@@ -229,7 +223,7 @@ class AuditLogger:
     def log_connection(self, event: str, details: Optional[str] = None):
         """
         Log SSH connection events.
-        
+
         Args:
             event: Event type (CONNECT, DISCONNECT, ERROR, etc.)
             details: Additional details
@@ -240,7 +234,7 @@ class AuditLogger:
         log_message = f"SSH {event}"
         if details:
             log_message += f" | {details}"
-        
+
         self.logger.info(log_message)
 
 

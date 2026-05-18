@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     openai_max_tokens: int = 4096
     openai_temperature: float = 0.0
 
+    # File read tool whitelist (comma-separated path prefixes)
+    # Only files/directories under these prefixes can be read via openwrt_read_file
+    read_file_allowed_paths: str = (
+        "/var/log/,/etc/config/,/tmp/dhcp.leases,"
+        "/proc/uptime,/proc/meminfo,/proc/cpuinfo,/proc/loadavg,"
+        "/etc/openwrt_release,/etc/banner"
+    )
+
     def validate_auth(self) -> None:
         """Ensure at least one authentication method is configured."""
         # Allow default SSH key authentication if neither password nor explicit key file is set
